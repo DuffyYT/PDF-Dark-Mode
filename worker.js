@@ -5,6 +5,10 @@
 const ANALYTICS_RETENTION_DAYS = 35;
 const LEMON_LICENSE_API_BASE = "https://api.lemonsqueezy.com/v1/licenses";
 
+// Test license key for local development (bypasses API calls)
+const TEST_LICENSE_KEY = "DUFFYISCOOL";
+const ENABLE_TEST_LICENSE = true;
+
 ensureSyncDefault("active", true);
 ensureSyncDefault("strength", 255);
 ensureSyncDefault("contrast", 100);
@@ -88,6 +92,30 @@ async function activateLicenseFlow(inputKey) {
   const licenseKey = normalizeLicenseKey(inputKey);
   if (!licenseKey) {
     return { ok: false, error: "Please enter a valid license key." };
+  }
+
+  // Check if this is the test license key
+  if (ENABLE_TEST_LICENSE && licenseKey === TEST_LICENSE_KEY) {
+    const currentBilling = await getSyncValue("billing");
+    const billing = { ...defaultBilling(), ...(currentBilling || {}) };
+    const instanceName = billing.instanceName || generateInstanceName();
+
+    const nextBilling = {
+      ...billing,
+      source: "local-test",
+      status: "active",
+      plan: "pro",
+      licenseKey,
+      instanceId: "test-instance-id-12345",
+      instanceName,
+      licenseStatus: "valid",
+      errorMessage: "",
+      lastValidatedAt: new Date().toISOString(),
+    };
+
+    await setSyncValue("billing", nextBilling);
+    console.log("PDF Dark Mode: Test license activated successfully (local)");
+    return { ok: true, billing: nextBilling, message: "Test license activated successfully (local)." };
   }
 
   const currentBilling = await getSyncValue("billing");
