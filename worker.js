@@ -4,7 +4,6 @@
 
 const ANALYTICS_RETENTION_DAYS = 35;
 const LEMON_LICENSE_API_BASE = "https://api.lemonsqueezy.com/v1/licenses";
-const VALIDATION_INTERVAL_HOURS = 24;
 
 ensureSyncDefault("active", true);
 ensureSyncDefault("strength", 255);
@@ -13,8 +12,6 @@ ensureSyncDefault("mode", "dark");
 ensureSyncDefault("siteRules", {});
 ensureSyncDefault("billing", defaultBilling());
 ensureLocalDefault("analytics", { events: {}, pdfAppliesByDay: {} });
-
-revalidateStoredLicenseIfNeeded();
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete" || !tab?.url || !tabId) {
@@ -41,12 +38,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
-  chrome.alarms.get("licenseValidation", (alarm) => {
-    if (!alarm) {
-      chrome.alarms.create("licenseValidation", { periodInMinutes: 360 });
-    }
-  });
-
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
     chrome.tabs.create({
       url: "./instruction/index.html",
@@ -57,16 +48,6 @@ chrome.runtime.onInstalled.addListener((details) => {
     chrome.tabs.create({
       url: "./instruction/update.html",
     });
-  }
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  revalidateStoredLicenseIfNeeded();
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "licenseValidation") {
-    revalidateStoredLicenseIfNeeded();
   }
 });
 
@@ -95,15 +76,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then((result) => sendResponse(result))
       .catch((error) => {
         sendResponse({ ok: false, error: error?.message || "Failed to activate license." });
-      });
-    return true;
-  }
-
-  if (message?.type === "license-validate") {
-    validateStoredLicenseFlow()
-      .then((result) => sendResponse(result))
-      .catch((error) => {
-        sendResponse({ ok: false, error: error?.message || "Failed to validate license." });
       });
     return true;
   }
@@ -186,116 +158,10 @@ async function activateLicenseFlow(inputKey) {
     licenseStatus: "valid",
     errorMessage: "",
     lastValidatedAt: new Date().toISOString(),
-    lastValidationAttemptAt: new Date().toISOString(),
   };
 
   await setSyncValue("billing", nextBilling);
   return { ok: true, billing: nextBilling, message: "License activated successfully." };
-}
-
-async function validateStoredLicenseFlow() {
-  const currentBilling = await getSyncValue("billing");
-  const billing = { ...defaultBilling(), ...(currentBilling || {}) };
-  const attemptAt = new Date().toISOString();
-
-  const licenseKey = normalizeLicenseKey(billing.licenseKey);
-  if (!licenseKey) {
-    return { ok: false, error: "No license key found. Enter and activate your key first." };
-  }
-
-  if (!billing.instanceId) {
-    return { ok: false, error: "No Lemon Squeezy instance ID found. Activate the license again." };
-  }
-
-  await setSyncValue("billing", {
-    ...billing,
-    lastValidationAttemptAt: attemptAt,
-  });
-
-  try {
-    const validationPayload = await postLemonLicenseRequest("validate", {
-      license_key: licenseKey,
-      instance_id: billing.instanceId,
-    });
-    const validation = extractValidationData(validationPayload);
-
-    const isValid = validation.valid;
-    const nextBilling = {
-      ...billing,
-      source: "lemon-license",
-      status: isValid ? "active" : "inactive",
-      plan: isValid ? resolvePlanFromValidation(validation) : "free",
-      licenseStatus: isValid ? "valid" : "invalid",
-      errorMessage: isValid ? "" : validation.error,
-      lastValidatedAt: new Date().toISOString(),
-      lastValidationAttemptAt: attemptAt,
-    };
-
-    await setSyncValue("billing", nextBilling);
-
-    if (!isValid) {
-      return { ok: false, error: validation.error, billing: nextBilling };
-    }
-
-    return { ok: true, message: "License is valid and active.", billing: nextBilling };
-  } catch (error) {
-    const failedBilling = {
-      ...billing,
-      errorMessage: error?.message || "License validation failed.",
-      lastValidationAttemptAt: attemptAt,
-    };
-    await setSyncValue("billing", failedBilling);
-    throw error;
-  }
-}
-
-async function revalidateStoredLicenseIfNeeded() {
-  const currentBilling = await getSyncValue("billing");
-  const billing = { ...defaultBilling(), ...(currentBilling || {}) };
-
-  const hasLicense = !!billing.licenseKey && !!billing.instanceId;
-  if (!hasLicense) {
-    return;
-  }
-
-  const shouldValidateNow = !billing.lastValidationAttemptAt || isOlderThanHours(
-    billing.lastValidationAttemptAt,
-    VALIDATION_INTERVAL_HOURS
-  );
-  if (!shouldValidateNow) {
-    return;
-  }
-
-  try {
-    await validateStoredLicenseFlow();
-  } catch (error) {
-    console.error("PDF Dark Mode: automatic license validation failed", error);
-    
-    // Only revoke on permanent API errors (explicit rejection), not network errors
-    const errorMsg = error?.message || "";
-    const isPermanentError = /instance.*not found|invalid|deactivated|revoked/i.test(errorMsg);
-    
-    if (isPermanentError) {
-      const failsafeBilling = {
-        ...billing,
-        plan: "free",
-        status: "inactive",
-        licenseStatus: "invalid",
-        errorMessage: errorMsg,
-        lastValidationAttemptAt: new Date().toISOString(),
-      };
-      await setSyncValue("billing", failsafeBilling);
-    }
-    // If it's a temporary error (network, timeout, etc.), keep current status and don't revoke
-  }
-}
-
-function isOlderThanHours(timestamp, hours) {
-  const millis = Date.parse(timestamp);
-  if (Number.isNaN(millis)) {
-    return true;
-  }
-  return Date.now() - millis > hours * 60 * 60 * 1000;
 }
 
 async function postLemonLicenseRequest(endpoint, payload) {
